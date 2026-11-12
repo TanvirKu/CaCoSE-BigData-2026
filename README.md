@@ -25,12 +25,13 @@ The code was developed with PyTorch 2.5.1 (CUDA 12.1) and PyTorch Geometric 2.6.
 
     python run_NC.py --dataset_no 1      # Cora
     python run_NC.py --dataset_no 13     # Chameleon
+## Dataset Example
+| `--dataset_no` | Dataset | 
+|---|---|
+| 1 | Cora | 
+| 2 | CiteSeer | 
+| 13 | Chameleon | 
 
-| `--dataset_no` | Dataset | | `--dataset_no` | Dataset |
-|---|---|---|---|---|
-| 1 | Cora | | 12 | DBLP |
-| 2 | CiteSeer | | 13 | Chameleon |
-| 3 | PubMed | | | |
 
 Each command does 10 runs (seeds 1 to 10, a new random split per run), prints the mean and standard deviation of the test accuracy, and appends one line to `results_NC.csv`.
 
