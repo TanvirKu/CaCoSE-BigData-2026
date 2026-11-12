@@ -1,12 +1,7 @@
-"""Influence vs. hop distance (Xu et al., ICML 2018) for CaCoSE.
+"""Influence vs. hop distance (Xu et al., ICML 2018) for CaCoSE and plain GCNs.
 
-Usage: at the end of run_NC.py, after CaCoSE is trained, add
-
-    from influence import influence_report
-    influence_report(model, data, name="CaCoSE")
-
-`model(data)` must return node outputs [N, C], and `data` must have
-x, edge_index, y and train_mask.
+Used by run_NC_influence.py. `model(data)` must return node outputs [N, C], and
+`data` must have x, edge_index, y, train_mask and test_mask.
 """
 import numpy as np
 import scipy.sparse as sp

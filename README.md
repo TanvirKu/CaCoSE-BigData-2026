@@ -1,46 +1,79 @@
-# CaCoSE: code fixes and long-range influence experiment
+# CaCoSE
 
-## 1. Two bugs in the submitted code
+Code for the CaCoSE paper (IEEE BigData 2026).
 
-**Bug 1 – subgraphs are not k-core levels** (`dataProcessing.py`, node classification).
-`process()` stores one score per undirected edge in NetworkX edge order. `cohesive_subgraph_extraction()` then indexes those scores with `torch.unique`'s *lexicographic* edge order. The two orders differ, so scores land on the wrong edges.
+CaCoSE splits a graph into cohesive subgraphs, one per k-core level, and lets these subgraphs exchange information:
 
-| Dataset | Edges on their correct level | Expected by random assignment |
+1. **Core levels.** An edge is on level *k* when it belongs to the *k*-core but not to the (*k*+1)-core.
+2. **CaEF.** An edge on a level ≥ δ − 1 whose end nodes share no neighbour inside that core is moved to the next lower level.
+3. **Subgraph encoding.** The edges of each level form one subgraph. A GCN with SAGPool gives its node embeddings and one subgraph embedding.
+4. **Cross-subgraph attention.** Self-attention over the subgraph embeddings.
+5. **Prediction.** Node classification: each node gets its own embedding joined with the embedding of its subgraph, followed by a GCN layer. Graph classification: the subgraph embeddings of a graph are averaged, followed by an MLP.
+
+## Setup
+
+The code was developed with PyTorch 2.5.1 (CUDA 12.1) and PyTorch Geometric 2.6.1.
+
+    pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+    pip install torch-scatter==2.1.2 -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+    pip install -r requirements.txt
+    unzip Data.zip
+
+`Data.zip` contains Cora, CiteSeer, PubMed, DBLP and Chameleon. Each dataset is an edge list (`u v` per line) and a label file (`node label` per line), with node ids `0..n-1`. To use another dataset from the `DATASETS` table in `execution.py`, add its two files to `Data/` in the same format. The graph classification datasets are downloaded by PyTorch Geometric on first use.
+
+## Node classification
+
+    python run_NC.py --dataset_no 1      # Cora
+    python run_NC.py --dataset_no 13     # Chameleon
+
+| `--dataset_no` | Dataset | | `--dataset_no` | Dataset |
+|---|---|---|---|---|
+| 1 | Cora | | 12 | DBLP |
+| 2 | CiteSeer | | 13 | Chameleon |
+| 3 | PubMed | | | |
+
+Each command does 10 runs (seeds 1 to 10, a new random split per run), prints the mean and standard deviation of the test accuracy, and appends one line to `results_NC.csv`.
+
+## Graph classification
+
+    python run_GC.py --dataset_name MUTAG
+    python run_GC.py --dataset_name PROTEINS
+
+`--dataset_name` is any TUDataset name (MUTAG, PROTEINS, NCI1, DD, IMDB-BINARY, ...). Each command does 10 runs with a new random 80/10/10 split per run and appends one line to `results_GC.csv`.
+
+## Options
+
+| Option | Default (NC / GC) | Meaning |
 |---|---|---|
-| Cora | 37.4% | 37.1% |
-| CiteSeer | 26.4% | 25.8% |
-| Chameleon | 5.3% | 5.7% |
+| `--delta` | 3 / 3 | CaEF threshold δ |
+| `--pooling_ratio` | 0.5 / 0.5 | SAGPool ratio |
+| `--num_heads` | 2 / 1 | heads in the cross-subgraph attention |
+| `--num_layers` | 2 / – | number of GNN layers (NC only) |
+| `--nhid` | 128 / 128 | hidden size |
+| `--lr` | 0.0025 / 0.0005 | learning rate |
+| `--weight_decay` | 0.0001 / 0.0001 | weight decay |
+| `--epochs` | 250 / 100 | maximum number of epochs |
+| `--given_patience` | 50 / 25 | early-stopping patience |
+| `--batch_size` | – / 128 | batch size (GC only) |
+| `--device` | `cuda:0` | use `cpu` to run without a GPU |
 
-`check_align.py` reproduces this with NetworkX and NumPy only:
-`python check_align.py Data/Cora/cora_edgelist_pyg.txt Data/Cora/cora_labels_pyg.txt`
+## Long-range influence
 
-Graph classification (`dataProcessingGC.py`) is probably unaffected, because TUDataset edge lists are sorted, which makes the two orders coincide. Check by adding the same assert there.
+    python run_NC_influence.py --dataset_no 1 --runs 5
 
-**Bug 2 – cross-subgraph attention does not mix subgraphs** (`model.py`, both NC and GC).
-`MultiHeadSelfAttention` receives `[N_S, 2h]` and reshapes it to `[N_S, 1, ...]`: N_S sequences of length 1. Every attention weight is exactly 1, so the layer is a per-subgraph linear map. Changing one subgraph's embedding leaves the others' outputs unchanged. This explains why removing attention changed accuracy so little in the ablation.
+Trains CaCoSE and plain GCNs with 2 to 5 layers, then measures how much each node's prediction depends on nodes at each hop distance (the influence score of Xu et al., ICML 2018). It prints the share of influence beyond 2, 3, 4 and 5 hops and saves `influence_<dataset>.csv`, `.pdf` and `.png`.
 
-## 2. Fixes
-`fixed/model.py` and `fixed/dataProcessing.py`; `fixes.diff` shows every changed line.
-- Edge scores are built per `edge_index` column, and the extraction uses them directly.
-- NC: attention runs over one sequence of N_S subgraph tokens.
-- GC: attention runs over each graph's own subgraphs (`to_dense_batch` plus a padding mask).
+## Files
 
-After replacing the files, rerun every CaCoSE result: NC/GC tables, δ, PR/NH sensitivity, ablation, and decomposition comparison. The pilot study (Fig. 1, Table I) used a separate script and is not affected.
+| File | Content |
+|---|---|
+| `dataProcessing.py` | core levels, CaEF, subgraph extraction, data splits |
+| `dataProcessingGC.py` | the same preparation for graph classification datasets |
+| `model.py` | `NodeClassifier`, `GraphClassifier` and the cross-subgraph attention |
+| `execution.py`, `run_NC.py` | training and evaluation, node classification |
+| `execution_GC.py`, `run_GC.py` | training and evaluation, graph classification |
+| `influence.py`, `run_NC_influence.py` | long-range influence experiment |
 
-## 3. Long-range influence experiment
-`influence_vs_distance.py` trains GCN-2, GCN-3, CaCoSE (submitted) and CaCoSE (fixed) on the same split. It then computes the influence score of Xu et al. (ICML 2018) by hop distance.
+## Citation
 
-Run it in a **copy** of the CaCoS folder that still has the *original* model.py/dataProcessing.py (it applies the fixes itself):
-
-    cp influence_vs_distance.py <CaCoS copy>/ && cd <CaCoS copy>
-    python influence_vs_distance.py --dataset Cora      --device cuda:0
-    python influence_vs_distance.py --dataset Chameleon --device cuda:0
-    python influence_vs_distance.py --dataset Squirrel  --device cuda:0
-
-It prints the share of edges on their correct level (a check of Bug 1 in your own environment), test accuracy, and the share of influence from nodes beyond 2 and 3 hops. It saves `influence_<dataset>.csv`, `.png` and `.pdf`.
-
-How to read it:
-- GCN-2 has zero influence beyond 2 hops, and GCN-3 zero beyond 3. This confirms the measurement is correct.
-- CaCoSE's local path covers at most 3 hops: two GCN layers inside a subgraph, plus the final GCN layer on the full graph. Any influence beyond 3 hops comes from the subgraph readout and attention. That share is the direct evidence that CaCoSE carries long-range information.
-
-The script was written against your code but not executed here (no PyTorch in this environment). Run Cora first; it takes a few minutes on a GPU.
+The BibTeX entry will be added when the proceedings are published.

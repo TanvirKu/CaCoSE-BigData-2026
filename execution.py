@@ -1,196 +1,112 @@
-
-import torch
+"""Training and evaluation for node classification."""
+import argparse
+import copy
 import os
 import random
+
 import numpy as np
+import torch
 import torch.nn.functional as F
-import networkx as nx
-from collections import OrderedDict
+
+from dataProcessing import build_data, load_graph, read_labels, split_masks
 from model import NodeClassifier
-from dataProcessing import ProcessDataset
 
-class Execution:
-    def __init__(self, dataset, edgelist_file, label_file, dimension, learning_rate, baseline, **kwargs):
-    
-        #torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.dataset = dataset
-        self.edgelist_file = edgelist_file
-        self.label_file = label_file
-        self.dimension = dimension
-        self.learning_rate = learning_rate
-        self.baseline = baseline
-        self.num_of_layers = 0
-        self.device = kwargs.get('device', 'cuda')
-        self.num_heads = kwargs.get('num_heads', 2)
-        self.decom_type = kwargs.get('decom_type','core')
-        self.weight_decay = kwargs.get('weight_decay', 0.0001)
-        self.epochs = kwargs.get('epochs', 250)
-        self.patience = kwargs.get('given_patience', 50)
-        self.pooling_ratio = kwargs.get('pooling_ratio', 0.5)
-        self.num_layers = kwargs.get('num_layers', 2)
-        self.seed =  kwargs.get('seed', 6)
-        self.delta =  kwargs.get('delta', 3)
-        self.result_path = os.getcwd()
+# dataset_no: (name, edge list, labels), paths relative to Data/
+DATASETS = {
+    1: ('Cora', 'Cora/cora_edgelist_pyg.txt', 'Cora/cora_labels_pyg.txt'),
+    2: ('CiteSeer', 'CiteSeer/citeseer_edgelist_dgl.txt', 'CiteSeer/citeseer_labels_dgl.txt'),
+    3: ('PubMed', 'PubMed/pubmed_edgelist_dgl.txt', 'PubMed/pubmed_labels_dgl.txt'),
+    4: ('Actor', 'Actor/actor_edgelist_dgl.txt', 'Actor/actor_labels_dgl.txt'),
+    5: ('Texas', 'Texas/texas_edgelist_dgl.txt', 'Texas/texas_labels_dgl.txt'),
+    6: ('Wisconsin', 'Wisconsin/wisconsin_edgelist_dgl.txt', 'Wisconsin/wisconsin_labels_dgl.txt'),
+    7: ('Cornell', 'Cornell/cornell_edgelist_dgl.txt', 'Cornell/cornell_labels_dgl.txt'),
+    8: ('CoAuthor', 'CoAuthor/coauthorCSD_edgelist_dgl.txt', 'CoAuthor/coauthorCSD_labels_dgl.txt'),
+    9: ('ACB_CS', 'CoAuthor/AmazonCoBuyCS_edgelist_dgl.txt', 'CoAuthor/AmazonCoBuyCS_labels_dgl.txt'),
+    10: ('ACB_Photo', 'CoAuthor/AmazonCoBuyPhoto_edgelist_dgl.txt', 'CoAuthor/AmazonCoBuyPhoto_labels_dgl.txt'),
+    11: ('CoA_Physics', 'CoAuthor/CoAuthor_Physics_edgelist_dgl.txt', 'CoAuthor/CoAuthor_Physics_labels_dgl.txt'),
+    12: ('DBLP', 'DBLP/DBLP_edgelist.txt', 'DBLP/DBLP_labels.txt'),
+    13: ('Chameleon', 'Chameleon/Chameleon_edgelist.txt', 'Chameleon/Chameleon_labels.txt'),
+    14: ('Squirrel', 'Squirrel/Squirrel_edgelist.txt', 'Squirrel/Squirrel_labels.txt'),
+    15: ('Crocodile', 'Crocodile/Crocodile_edgelist.txt', 'Crocodile/Crocodile_labels.txt'),
+}
 
-########################################### Node Classifier Test ###################################
-    def setup_seed(self, seed):
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
-    def train_test_nc(self, model, data_main):
-        
-        model = model.to(self.device)
-        data_main = data_main.to(self.device)
-        
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        # scheduler = ReduceLROnPlateau(optimizer,  patience=25)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=25)
-        best_val_acc = 0
-        patience = self.patience
-        no_improvement = 0
-    
-        def run(phase='train', epoch = 0):
-            model.train() if phase == 'train' else model.eval()
-            out, _ = model(data_main, epoch = epoch)  # Get predictions AND embeddings
-            
-            # Phase-specific mask selection
-            if phase == 'train':
-                mask = data_main.train_mask
-            elif phase == 'val':
-                mask = data_main.val_mask
-            else:  # test
-                mask = data_main.test_mask
-    
-            if phase == 'train':
-                loss = F.cross_entropy(out[mask], data_main.y[mask])
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                # scheduler.step(loss)
-            else:
-                loss = None
-                
-            # Calculate accuracy for current phase
-            pred = out.argmax(dim=1)
-            acc = (pred[mask] == data_main.y[mask]).float().mean()
-            return loss.item() if loss else None, acc.item()
-        
-        saved_model = ''
-        for epoch in range(1, (self.epochs+1)):
-            # Training phase
-            train_loss, train_acc = run('train', epoch = epoch)
-            
-            # Validation phase
-            with torch.no_grad():
-                val_loss, val_acc = run('val')
-            
-            # Early stopping logic
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                no_improvement = 0
-                
-                saved_model = "best_model_tp_nc_"+ str(self.dataset)+"_"+str(self.decom_type)+"_.pth"
-                torch.save(model.state_dict(), saved_model)
-            else:
-                no_improvement += 1
-                if no_improvement >= patience:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
-            
-            # Logging
-            if epoch % 10 == 0:
-                print(f'Epoch: {epoch:03d} | Loss: {train_loss:.4f} | '
-                      f'Train Acc: {train_acc:.2%} | Val Acc: {val_acc:.2%}')
-    
-        # Final testing with best model
-        model.load_state_dict(torch.load(saved_model,  weights_only = True))
+def get_parser():
+    parser = argparse.ArgumentParser(description='CaCoSE node classification.')
+    parser.add_argument('--dataset_no', type=int, default=2, help='see DATASETS in execution.py')
+    parser.add_argument('--lr', type=float, default=0.0025, help='learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay')
+    parser.add_argument('--nhid', type=int, default=128, help='hidden size')
+    parser.add_argument('--pooling_ratio', type=float, default=0.5, help='SAGPool ratio')
+    parser.add_argument('--num_layers', type=int, default=2, help='number of GNN layers')
+    parser.add_argument('--num_heads', type=int, default=2, help='heads in the cross-subgraph attention')
+    parser.add_argument('--delta', type=int, default=3, help='CaEF threshold')
+    parser.add_argument('--epochs', type=int, default=250, help='maximum number of epochs')
+    parser.add_argument('--given_patience', type=int, default=50, help='early-stopping patience')
+    parser.add_argument('--device', type=str, default='cuda:0', help='cuda device or cpu')
+    return parser
+
+
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def load_data(args):
+    """Dataset name and its graph, with the cohesive subgraphs attached."""
+    name, edgelist, labels = DATASETS[args.dataset_no]
+    labels = read_labels(os.path.join('Data', labels))
+    G = load_graph(os.path.join('Data', edgelist), labels)
+    print(name, G)
+    data = build_data(G, labels, args.delta, args.device)
+    print(f'Cohesive subgraphs: {len(data.subgraphs)}')
+    return name, data
+
+
+def accuracy(out, data, mask):
+    return (out[mask].argmax(dim=1) == data.y[mask]).float().mean().item()
+
+
+def train_and_test(model, data, args):
+    """Train with early stopping on validation accuracy; return the test accuracy of the best model."""
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    best_val_acc, best_state, waited = 0, copy.deepcopy(model.state_dict()), 0
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        loss = F.nll_loss(model(data)[data.train_mask], data.y[data.train_mask])
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        model.eval()
         with torch.no_grad():
-            _, test_acc = run('test')
-        
-        print(f'\nFinal Test Accuracy: {test_acc:.2%}')
-        return test_acc
+            val_acc = accuracy(model(data), data, data.val_mask)
+        if epoch % 10 == 0:
+            print(f'Epoch: {epoch:03d} | Loss: {loss.item():.4f} | Val Acc: {val_acc:.2%}')
 
-  
-  ##################### Node Classification Method ########################
+        waited += 1
+        if val_acc > best_val_acc:
+            best_val_acc, best_state, waited = val_acc, copy.deepcopy(model.state_dict()), 0
+        if waited >= args.given_patience:
+            print(f'Early stopping at epoch {epoch}')
+            break
 
-    def node_classification(self, data, baseline):
-    
-        best_test_acc = 0
-        baseline = baseline # input('Type the model name: ')
+    model.load_state_dict(best_state)
+    with torch.no_grad():
+        return accuracy(model(data), data, data.test_mask)
 
-        print('The selected Baseline: ',baseline)
 
-        model = NodeClassifier(data.x.shape[1], nhid = self.dimension, num_classes= data.num_classes, \
-                             pooling_ratio=self.pooling_ratio, num_layers = self.num_layers, \
-                             num_heads=self.num_heads).to(self.device)
-        best_test_acc = self.train_test_nc(model, data)
-
-        return best_test_acc
-
-    def final_Operation(self):
-    
-        label_dict, num_of_classes = ProcessDataset.get_label_dict(self)
-        infant_Graph = nx.Graph()
-        infant_Graph.add_nodes_from(list(label_dict.keys()))
-        G = nx.read_edgelist(self.edgelist_file, nodetype=int)
-        G = nx.compose(G, infant_Graph)
-        G.remove_edges_from(nx.selfloop_edges(G))
-      
-        print('Original Graph: ', G)
-        baseline = self.baseline 
-        print('The Method: ', baseline)
-      
-        number_of_run = 10
-        result_list = list()
-        
-        dataset = ProcessDataset(G, self.label_file, self.dataset, \
-                                 decom_type = self.decom_type, device = self.device, delta = self.delta)
-        data = dataset.process()
-        
-        print(f"Dataset Details: {dataset}")
-        for i in range(number_of_run):
-      
-            print(f"\n Iter: {i+1}")
-      
-            self.seed = i + 1
-            self.setup_seed(self.seed)
-            #setup_seed(self.seed)
-           
-            if i > 0: 
-                train_mask, val_mask, test_mask = dataset.get_train_val_test_masks(n_nodes= len(G.nodes()), seed = self.seed)
-                data.train_mask = train_mask
-                data.val_mask = val_mask
-                data.test_mask = test_mask
-                
-            best_test_acc = 0
-            
-            
-            print('Training_of_Graph: \n')
-            print(G)
-            
-            best_test_acc= self.node_classification(data, baseline = 'tcpool')
-            # tup = (best_test_acc_orgG,) ### + tuple(best_test_acc_pr_Graph_list)
-            result_list.append(best_test_acc)
-      
-        ### mean operation
-        final_result = torch.mean(torch.tensor(result_list)).item()
-        print(f"Average Result of 10 iterations: {final_result}")
-  
-        with open(self.result_path + '/' +'result_file.csv', 'a') as result_file:
-          result_file.write(str(self.dataset))
-          result_file.write(',')
-          result_file.write(str(self.baseline))
-          result_file.write(',')
-          result_file.write(str(self.decom_type))
-          result_file.write('\n')
-  
-          result_file.write('Average result:'+': '+str(final_result)+'\n')
-          for result in result_list:
-            result_file.write(str(round(result,4)))
-            result_file.write(',')
-          result_file.write('\n')
-          result_file.close()
+def run_once(name, data, seed, args):
+    """One run: new random split, new model. Returns the trained model and its test accuracy."""
+    setup_seed(seed)
+    data.train_mask, data.val_mask, data.test_mask = split_masks(name, data.num_nodes, seed, args.device)
+    model = NodeClassifier(data.x.shape[1], args.nhid, data.num_classes, pooling_ratio=args.pooling_ratio,
+                           num_layers=args.num_layers, num_heads=args.num_heads).to(args.device)
+    test_acc = train_and_test(model, data, args)
+    print(f'Run {seed}: test accuracy {test_acc:.2%}')
+    return model, test_acc

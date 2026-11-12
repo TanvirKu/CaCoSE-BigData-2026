@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+Data/
+data/
+results_*.csv
+influence_*.csv
+influence_*.pdf
+influence_*.png
